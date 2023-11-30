@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-
 use autometrics::prometheus_exporter;
 use axum::{Router, routing::get};
 use tokio::{
@@ -7,9 +6,7 @@ use tokio::{
     sync::oneshot::{self, Receiver, Sender},
 };
 use tonic::transport::Server as TonicServer;
-
 use server::MyJobRunner;
-
 use crate::server::job::job_runner_server::JobRunnerServer;
 
 mod server;
@@ -41,9 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             signal_rx.await.ok();
         });
 
-    // Start gRPC server
-    //
-    // This one probably blocks the subsequence start of the web server.
+    // Start gRPC servedr
+    // This one probably blocks the subsequent start of the web server. How do I start them either in Tandem?
     println!("Server listening on {}", grpc_addr);
     server
         .await
@@ -56,7 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Web server with Axum
-    //
     // How do I add a graceful shutdown signal handler
     // that triggers a proper shutdown together with the gRPC server?
     axum::Server::bind(&web_addr)
