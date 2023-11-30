@@ -1,8 +1,13 @@
 use autometrics::prometheus_exporter;
 use axum::{routing::get, Router};
-use server::{job, MyJobRunner};
+use server::{MyJobRunner};
 use std::net::SocketAddr;
 use tonic::transport::Server;
+use tokio::{
+    signal::unix::{signal, SignalKind}, spawn,
+    sync::oneshot::{self, Receiver, Sender},
+};
+use crate::server::job::job_runner_server::JobRunnerServer;
 
 mod server;
 
@@ -15,11 +20,17 @@ async fn main() {
     let web_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
     // gRPC server
-    let grpc_service = job::job_runner_server::JobRunnerServer::new(MyJobRunner::default());
+    let grpc_service = JobRunnerServer::new(MyJobRunner::default());
 
-    tokio::spawn(async move {
+    // Construct health service for gRPC server
+    let (mut health_reporter, health_svc) = tonic_health::server::health_reporter();
+    health_reporter.set_serving::<JobRunnerServer<MyJobRunner>>().await;
+
+
+    spawn(async move {
         Server::builder()
             .add_service(grpc_service)
+            .add_service(health_svc)
             .serve(grpc_addr)
             .await
             .expect("gRPC server failed");

@@ -7,8 +7,9 @@ edition = "2021"
 autometrics = { version = "0.6.0", features = ["prometheus-exporter"] }
 axum = "0.6.18"
 prost = "0.12"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["full"] }
 tonic = "0.10"
+tonic-health = "0.10"
 
 [build-dependencies]
 tonic-build = "0.10"
