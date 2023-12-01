@@ -1,21 +1,22 @@
 use std::net::SocketAddr;
+
 use autometrics::prometheus_exporter;
-use axum::{Router, routing::get};
-use tokio::{
-    signal::unix::{signal, SignalKind}, spawn,
-    sync::oneshot::{self, Receiver, Sender},
-};
+use tokio::signal::unix::{signal, SignalKind};
 use tonic::transport::Server as TonicServer;
+use warp::Filter;
+
 use server::MyJobRunner;
+
 use crate::server::job::job_runner_server::JobRunnerServer;
 
 mod server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up the exporter to collect metrics
+    // Set up prometheus metrics exporter
     prometheus_exporter::init();
 
+    // Set up two different ports for gRPC and HTTP
     let grpc_addr = "127.0.0.1:50051".parse().expect("Failed to parse gRPC address");
     let web_addr: SocketAddr = "127.0.0.1:8080".parse().expect("Failed to parse web address");
 
@@ -26,57 +27,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut health_reporter, health_svc) = tonic_health::server::health_reporter();
     health_reporter.set_serving::<JobRunnerServer<MyJobRunner>>().await;
 
-    // Construct sigint signal handler for graceful shutdown
-    let (signal_tx, signal_rx) = signal_channel();
-    spawn(handle_sigterm(signal_tx));
-
     // Build gRPC server with health service and signal sigint handler
-    let server = TonicServer::builder()
+    let grpc_server = TonicServer::builder()
         .add_service(svc)
         .add_service(health_svc)
-        .serve_with_shutdown(grpc_addr, async {
-            signal_rx.await.ok();
-        });
+        .serve_with_shutdown(grpc_addr, grpc_sigint());
 
-    // Start gRPC servedr
-    // This one probably blocks the subsequent start of the web server. How do I start them either in Tandem?
-    println!("Server listening on {}", grpc_addr);
-    server
-        .await
-        .expect("Failed to start server");
+    // Build http /metrics endpoint
+    let routes = warp::get()
+        .and(warp::path("metrics"))
+        .map(|| prometheus_exporter::encode_http_response());
 
-    // Http handler that exposes metrics to Prometheus
-    let app = Router::new().route("/", get(handler)).route(
-        "/metrics",
-        get(|| async { prometheus_exporter::encode_http_response() }),
-    );
+    // Build http web server
+    let (_, web_server) = warp::serve(routes)
+        .bind_with_graceful_shutdown(web_addr, http_sigint());
 
-    // Web server with Axum
-    // How do I add a graceful shutdown signal handler
-    // that triggers a proper shutdown together with the gRPC server?
-    axum::Server::bind(&web_addr)
-        .serve(app.into_make_service())
-        .await
-        .expect("Web server failed");
+    // Create handler for each server
+    //  https://github.com/hyperium/tonic/discussions/740
+    let grpc_handle = tokio::spawn(grpc_server);
+    let grpc_web_handle = tokio::spawn(web_server);
+
+    println!("Started gRPC server on port {:?} and metrics on port {:?}", grpc_addr.port(), web_addr.port());
+    // Join all servers together and start the the main loop
+    let _ = tokio::try_join!(grpc_handle, grpc_web_handle)
+        .expect("Failed to start gRPC and http server");
 
     Ok(())
 }
 
-async fn handler() -> &'static str {
-    "Hello, World!"
-}
-
-
-fn signal_channel() -> (Sender<()>, Receiver<()>) {
-    oneshot::channel()
-}
-
-async fn handle_sigterm(tx: Sender<()>) {
+// Signal sender is non-clonable therefore we need to create a new one for each server.
+// https://github.com/rust-lang/futures-rs/issues/1971
+async fn http_sigint() {
     let _ = signal(SignalKind::terminate())
-        .expect("failed to install signal handler")
+        .expect("failed to create a new SIGINT signal handler for htttp")
         .recv()
         .await;
 
-    println!("SIGTERM received: shutting down");
-    let _ = tx.send(());
+    println!("http shutdown complete");
+}
+
+async fn grpc_sigint() {
+    let _ = signal(SignalKind::terminate())
+        .expect("failed to create a new SIGINT signal handler for gRPC")
+        .recv()
+        .await;
+
+    println!("gRPC shutdown complete");
 }
