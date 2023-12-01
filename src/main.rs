@@ -6,10 +6,12 @@ use tonic::transport::Server as TonicServer;
 use warp::Filter;
 
 use server::MyJobRunner;
+use crate::db_manager::DBManager;
 
 use crate::server::job::job_runner_server::JobRunnerServer;
 
 mod server;
+mod db_manager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,8 +22,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr = "127.0.0.1:50051".parse().expect("Failed to parse gRPC address");
     let web_addr: SocketAddr = "127.0.0.1:8080".parse().expect("Failed to parse web address");
 
-    // gRPC server
-    let svc = JobRunnerServer::new(MyJobRunner::default());
+    // Build new DBManager that connects to the database
+    let dbm = db_manager::DBManager::new();
+    // Connect to the database
+    dbm.connect_to_db().await.expect("Failed to connect to database");
+
+    // gRPC server with DBManager
+    let grpc_svc = JobRunnerServer::new(MyJobRunner::new(dbm));
+
+    // Sigint signal handler that closes the DB connection upon shutdown
+    let signal = grpc_sigint(dbm.clone());
 
     // Construct health service for gRPC server
     let (mut health_reporter, health_svc) = tonic_health::server::health_reporter();
@@ -29,9 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build gRPC server with health service and signal sigint handler
     let grpc_server = TonicServer::builder()
-        .add_service(svc)
+        .add_service(grpc_svc)
         .add_service(health_svc)
-        .serve_with_shutdown(grpc_addr, grpc_sigint());
+        .serve_with_shutdown(grpc_addr, signal);
 
     // Build http /metrics endpoint
     let routes = warp::get()
@@ -66,11 +76,14 @@ async fn http_sigint() {
     println!("http shutdown complete");
 }
 
-async fn grpc_sigint() {
+async fn grpc_sigint(dbm: DBManager) {
     let _ = signal(SignalKind::terminate())
         .expect("failed to create a new SIGINT signal handler for gRPC")
         .recv()
         .await;
+
+    // Shutdown the DB connection.
+    dbm.close_db().await.expect("Failed to close database connection");
 
     println!("gRPC shutdown complete");
 }
